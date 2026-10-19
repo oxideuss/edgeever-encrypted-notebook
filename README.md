@@ -15,7 +15,8 @@ The preview supports headings, paragraphs, emphasis, links, lists, blockquotes, 
 - Every save generates a fresh 16-byte random salt and 12-byte random AES-GCM nonce (IV). The nonce must not repeat with the same key; generating a fresh salt also derives a fresh key for each save.
 - AES-GCM uses a 128-bit authentication tag. A wrong passphrase or modified ciphertext fails authentication.
 - The stored envelope carries the algorithm, KDF name and iteration count, salt, nonce, and ciphertext. These parameters are required for decryption and are not secret. The envelope encoding is only a serialization format, not extra encryption.
-- Notebook names and the existence of an encrypted data note remain visible in EdgeEver. Note titles and Markdown are encrypted together inside the payload.
+- Notebook names, the encrypted data note, and its `encrypted-notebook-vault` discovery tag remain visible in EdgeEver. Note titles and Markdown are encrypted together inside the payload.
+- Vault discovery uses the tag for new notebooks and paginates older notes by title, so notebooks beyond the 200-note query page limit remain discoverable.
 
 ## Client-side plaintext
 
