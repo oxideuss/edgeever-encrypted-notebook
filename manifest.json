@@ -1,0 +1,27 @@
+{
+  "type": "plugin",
+  "id": "com.edgeever.encrypted-notebook",
+  "name": "Encrypted Notebook",
+  "version": "1.0.0",
+  "apiVersion": "2",
+  "settingsUi": "host",
+  "description": "Create passphrase-protected notebooks with client-side encryption.",
+  "entry": "./main.js",
+  "platforms": ["web", "desktop"],
+  "permissions": ["metadata:read", "metadata:write", "notes:read", "notes:write", "ui:commands", "ui:notices", "ui:panels"],
+  "settings": {
+    "fields": [
+      {
+        "key": "encryption-algorithm",
+        "type": "select",
+        "label": "Encryption for new notebooks",
+        "default": "AES-GCM-256",
+        "options": [
+          { "value": "AES-GCM-256", "label": "AES-GCM with 256-bit key (recommended)" },
+          { "value": "AES-GCM-128", "label": "AES-GCM with 128-bit key" }
+        ]
+      }
+    ]
+  }
+}
+
