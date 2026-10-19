@@ -16,7 +16,7 @@ The preview supports headings, paragraphs, emphasis, links, lists, blockquotes, 
 - AES-GCM uses a 128-bit authentication tag. A wrong passphrase or modified ciphertext fails authentication.
 - The stored envelope carries the algorithm, KDF name and iteration count, salt, nonce, and ciphertext. These parameters are required for decryption and are not secret. The envelope encoding is only a serialization format, not extra encryption.
 - Notebook names, the encrypted data note, and its `encrypted-notebook-vault` discovery tag remain visible in EdgeEver. Note titles and Markdown are encrypted together inside the payload.
-- Vault discovery uses the tag for new notebooks and paginates older notes by title, so notebooks beyond the 200-note query page limit remain discoverable.
+- Vault discovery queries the tag across notebooks, then matches the vault note's current notebook association. This allows the plugin to detect stale notebook IDs; it offers a repair action to move an orphaned vault note into the notebook selected in the plugin. Older untagged vaults are found through a paginated title search within their notebook.
 
 ## Client-side plaintext
 
