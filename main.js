@@ -3,6 +3,7 @@ const VAULT_TITLE = "Encrypted notebook data";
 const VAULT_TAG = "encrypted-notebook-vault";
 const ENVELOPE = "EDGE_EVER_ENCRYPTED_NOTEBOOK_V1\n";
 const PBKDF2_ITERATIONS = 310000;
+const NOTEBOOK_ID_SYNC_TIMEOUT_MS = 60000;
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
 
@@ -213,8 +214,12 @@ export default {
     let passphrase = "";
     let encryptedNoteId = null;
     let dirty = false;
+    let creationPending = false;
     const clearSession = () => { notebook = null; passphrase = ""; encryptedNoteId = null; dirty = false; if (panel) panel.replaceChildren(); };
-    const mayLeave = () => !dirty || window.confirm("Leave this notebook and discard unsaved changes?");
+    const mayLeave = () => {
+      if (creationPending) { window.alert("Keep this panel open until EdgeEver syncs the notebook, then retry to finish encrypted notebook creation."); return false; }
+      return !dirty || window.confirm("Leave this notebook and discard unsaved changes?");
+    };
     async function queryVaultSummaries(query = {}) {
       const notes = [];
       let offset = 0;
@@ -261,6 +266,28 @@ export default {
       } catch (error) {
         await home(container, `Could not repair encrypted data association: ${error.message}`);
       }
+    }
+    const isTemporaryNotebookId = (value) => typeof value === "string" && value.startsWith("local_");
+    const delay = (ms) => new Promise((resolve) => window.setTimeout(resolve, ms));
+    async function resolveCreatedNotebook(finalName, syncingName, status) {
+      const deadline = Date.now() + NOTEBOOK_ID_SYNC_TIMEOUT_MS;
+      let lastError = null;
+      while (Date.now() < deadline) {
+        try {
+          const current = await context.notebooks.list();
+          // A unique temporary name lets us follow the notebook across the host's
+          // local-ID to server-ID remap without relying on name collisions or ID equality.
+          const match = current.find((item) => item.name === syncingName && !isTemporaryNotebookId(item.id));
+          if (match) {
+            if (match.name !== finalName) await context.notebooks.update(match.id, { name: finalName });
+            return { ...match, name: finalName };
+          }
+        } catch (error) { lastError = error; }
+        status.textContent = "Waiting for EdgeEver to sync the notebook before saving encrypted data…";
+        await delay(1000);
+      }
+      const detail = lastError ? ` (${lastError.message})` : "";
+      throw new Error(`The notebook was created locally, but EdgeEver has not assigned its permanent ID yet. No encrypted note was created. Leave this form open and retry after sync.${detail}`);
     }
     async function home(container, noticeText = "") {
       clearSession(); panel = container;
@@ -332,6 +359,7 @@ export default {
     }
     function createScreen(container) {
       clearSession(); panel = container;
+      let pendingCreation = null;
       const form = el("form", "", "enb-form");
       form.append(el("h2", "Create encrypted notebook"));
       const name = el("input"); name.placeholder = "Notebook name"; name.required = true; name.maxLength = 120;
@@ -339,23 +367,43 @@ export default {
       const confirm = el("input"); confirm.type = "password"; confirm.placeholder = "Confirm passphrase"; confirm.required = true; confirm.autocomplete = "new-password";
       const status = el("p", "", "enb-status"); const editor = createEditor();
       const actions = el("div", "", "enb-actions"); const submit = el("button", "Encrypt and create"); submit.type = "submit";
-      const cancel = button("Cancel", () => home(container)); actions.append(submit, cancel);
+      const cancel = button("Cancel", () => { if (mayLeave()) home(container); }); actions.append(submit, cancel);
       form.append(name, password, confirm, editor.element, actions, status); container.replaceChildren(form);
       form.addEventListener("submit", async (event) => {
         event.preventDefault();
-        if (password.value.length < 12 || password.value !== confirm.value) { status.textContent = password.value !== confirm.value ? "Passphrases do not match." : "Use a passphrase with at least 12 characters."; return; }
+        if (!pendingCreation && (password.value.length < 12 || password.value !== confirm.value)) { status.textContent = password.value !== confirm.value ? "Passphrases do not match." : "Use a passphrase with at least 12 characters."; return; }
         submit.disabled = true; status.textContent = "Encrypting and saving…";
         try {
-          const setting = await context.settings.get("encryption-algorithm");
-          const algorithm = setting === "AES-GCM-128" ? setting : "AES-GCM-256";
-          const first = { ...emptyNote("Note 1"), markdown: editor.getValue() };
-          const content = { format: "encrypted-notebook-content-v1", activeId: first.id, notes: [first] };
-          const payload = await encrypt(JSON.stringify(content), password.value, algorithm);
-          const created = await context.notebooks.create({ name: name.value.trim(), parentId: null });
-          await context.notes.create({ notebookId: created.id, title: VAULT_TITLE, contentMarkdown: pack(payload), tags: [VAULT_TAG] });
+          if (!pendingCreation) {
+            const setting = await context.settings.get("encryption-algorithm");
+            const algorithm = setting === "AES-GCM-128" ? setting : "AES-GCM-256";
+            const first = { ...emptyNote("Note 1"), markdown: editor.getValue() };
+            const content = { format: "encrypted-notebook-content-v1", activeId: first.id, notes: [first] };
+            const payload = await encrypt(JSON.stringify(content), password.value, algorithm);
+            const finalName = name.value.trim();
+            const syncingName = `Encrypted notebook syncing ${id().slice(0, 12)}`;
+            await context.notebooks.create({ name: syncingName, parentId: null });
+            pendingCreation = { finalName, syncingName, payload };
+            creationPending = true;
+            password.value = ""; confirm.value = "";
+          }
+          const stableNotebook = await resolveCreatedNotebook(pendingCreation.finalName, pendingCreation.syncingName, status);
+          const alreadySaved = await findVault(stableNotebook.id);
+          const saved = alreadySaved || await context.notes.create({ notebookId: stableNotebook.id, title: VAULT_TITLE, contentMarkdown: pack(pendingCreation.payload), tags: [VAULT_TAG] });
+          if (saved?.notebookId !== stableNotebook.id) {
+            await context.notes.move([saved.id], stableNotebook.id);
+            const verified = await context.notes.get(saved.id);
+            if (verified?.notebookId !== stableNotebook.id) throw new Error("EdgeEver did not save the encrypted data note in its notebook. The note was not accepted as created.");
+          }
+          pendingCreation = null;
+          creationPending = false;
           password.value = ""; confirm.value = ""; editor.setValue(""); name.value = "";
           await home(container, "Encrypted notebook created.");
-        } catch (error) { status.textContent = `Could not create notebook: ${error.message}`; submit.disabled = false; }
+        } catch (error) {
+          status.textContent = `${pendingCreation ? "Creation is pending; retrying will not create another notebook. " : "Could not create notebook: "}${error.message}`;
+          if (pendingCreation) submit.textContent = "Retry after sync";
+          submit.disabled = false;
+        }
       });
     }
     async function unlock(container, item) {
