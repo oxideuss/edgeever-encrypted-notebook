@@ -1,5 +1,6 @@
 const PANEL_ID = "encrypted-notebook";
 const VAULT_TITLE = "Encrypted notebook data";
+const VAULT_TAG = "encrypted-notebook-vault";
 const ENVELOPE = "EDGE_EVER_ENCRYPTED_NOTEBOOK_V1\n";
 const PBKDF2_ITERATIONS = 310000;
 const encoder = new TextEncoder();
@@ -215,8 +216,30 @@ export default {
     const clearSession = () => { notebook = null; passphrase = ""; encryptedNoteId = null; dirty = false; if (panel) panel.replaceChildren(); };
     const mayLeave = () => !dirty || window.confirm("Leave this notebook and discard unsaved changes?");
     async function findVault(notebookId) {
-      const result = await context.notes.query({ notebookId, limit: 200, offset: 0 });
-      const item = result.notes.find((note) => note.title === VAULT_TITLE);
+      async function findSummary(tags) {
+        let offset = 0;
+        for (;;) {
+          const result = await context.notes.query({
+            notebookId,
+            ...(tags ? { tags } : {}),
+            sort: "created-desc",
+            limit: 200,
+            offset,
+          });
+          const notes = Array.isArray(result?.notes) ? result.notes : [];
+          const item = notes.find((note) => tags ? true : note.title === VAULT_TITLE);
+          if (item) return item;
+          if (result?.nextOffset == null) return null;
+          if (!Number.isInteger(result.nextOffset) || result.nextOffset <= offset) {
+            throw new Error("The note query returned an invalid pagination cursor.");
+          }
+          offset = result.nextOffset;
+        }
+      }
+
+      // Fast path for new vaults; the paginated title scan also finds older vault notes.
+      const tagged = await findSummary([VAULT_TAG]);
+      const item = tagged || await findSummary(null);
       return item ? context.notes.get(item.id) : null;
     }
     async function home(container, noticeText = "") {
@@ -230,10 +253,15 @@ export default {
         const notebooks = await context.notebooks.list();
         const list = el("div", "", "enb-notebook-list");
         for (const item of notebooks) {
-          const note = await findVault(item.id);
-          if (!note) continue;
           const row = el("div", "", "enb-notebook-row");
-          row.append(el("span", item.name), button("Decrypt", () => unlock(container, item)));
+          row.append(el("span", item.name));
+          try {
+            const note = await findVault(item.id);
+            if (note) row.append(button("Decrypt", () => unlock(container, item)));
+            else row.append(el("span", "Encrypted data note not found.", "enb-status"));
+          } catch (error) {
+            row.append(el("span", `Could not check encrypted data: ${error.message}`, "enb-status"));
+          }
           list.append(row);
         }
         container.append(list);
@@ -261,7 +289,7 @@ export default {
           const content = { format: "encrypted-notebook-content-v1", activeId: first.id, notes: [first] };
           const payload = await encrypt(JSON.stringify(content), password.value, algorithm);
           const created = await context.notebooks.create({ name: name.value.trim(), parentId: null });
-          await context.notes.create({ notebookId: created.id, title: VAULT_TITLE, contentMarkdown: pack(payload), tags: [] });
+          await context.notes.create({ notebookId: created.id, title: VAULT_TITLE, contentMarkdown: pack(payload), tags: [VAULT_TAG] });
           password.value = ""; confirm.value = ""; editor.setValue(""); name.value = "";
           await home(container, "Encrypted notebook created.");
         } catch (error) { status.textContent = `Could not create notebook: ${error.message}`; submit.disabled = false; }
