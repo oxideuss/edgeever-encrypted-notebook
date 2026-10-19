@@ -215,32 +215,47 @@ export default {
     let dirty = false;
     const clearSession = () => { notebook = null; passphrase = ""; encryptedNoteId = null; dirty = false; if (panel) panel.replaceChildren(); };
     const mayLeave = () => !dirty || window.confirm("Leave this notebook and discard unsaved changes?");
-    async function findVault(notebookId) {
-      async function findSummary(tags) {
-        let offset = 0;
-        for (;;) {
-          const result = await context.notes.query({
-            notebookId,
-            ...(tags ? { tags } : {}),
-            sort: "created-desc",
-            limit: 200,
-            offset,
-          });
-          const notes = Array.isArray(result?.notes) ? result.notes : [];
-          const item = notes.find((note) => tags ? true : note.title === VAULT_TITLE);
-          if (item) return item;
-          if (result?.nextOffset == null) return null;
-          if (!Number.isInteger(result.nextOffset) || result.nextOffset <= offset) {
-            throw new Error("The note query returned an invalid pagination cursor.");
-          }
-          offset = result.nextOffset;
+    async function queryVaultSummaries(query = {}) {
+      const notes = [];
+      let offset = 0;
+      for (;;) {
+        const result = await context.notes.query({
+          ...query,
+          sort: "created-desc",
+          limit: 200,
+          offset,
+        });
+        notes.push(...(Array.isArray(result?.notes) ? result.notes : []));
+        if (result?.nextOffset == null) return notes;
+        if (!Number.isInteger(result.nextOffset) || result.nextOffset <= offset) {
+          throw new Error("The note query returned an invalid pagination cursor.");
         }
+        offset = result.nextOffset;
       }
+    }
+    async function findTaggedVaults() {
+      const notes = await queryVaultSummaries({ tags: [VAULT_TAG] });
+      return notes.filter((note) => note.title === VAULT_TITLE);
+    }
+    async function findVault(notebookId, taggedVaults = null) {
+      // Tag queries are global. Match by the note's current association first,
+      // so a stale/mismatched notebook ID cannot hide the encrypted payload.
+      const tagged = taggedVaults || await findTaggedVaults();
+      const match = tagged.find((note) => note.notebookId === notebookId);
+      if (match) return context.notes.get(match.id);
 
-      // Fast path for new vaults; the paginated title scan also finds older vault notes.
-      const tagged = await findSummary([VAULT_TAG]);
-      const item = tagged || await findSummary(null);
+      // Legacy vaults may predate the marker tag; keep their lookup notebook-scoped.
+      const legacy = await queryVaultSummaries({ notebookId });
+      const item = legacy.find((note) => note.title === VAULT_TITLE);
       return item ? context.notes.get(item.id) : null;
+    }
+    async function repairVaultAndUnlock(container, notebookItem, vaultNote) {
+      try {
+        await context.notes.move([vaultNote.id], notebookItem.id);
+        await unlock(container, notebookItem);
+      } catch (error) {
+        await home(container, `Could not repair encrypted data association: ${error.message}`);
+      }
     }
     async function home(container, noticeText = "") {
       clearSession(); panel = container;
@@ -252,16 +267,51 @@ export default {
       try {
         const notebooks = await context.notebooks.list();
         const list = el("div", "", "enb-notebook-list");
+        let taggedVaults = [];
+        let tagLookupError = null;
+        try { taggedVaults = await findTaggedVaults(); }
+        catch (error) { tagLookupError = error; }
+        const entries = [];
+        const claimed = new Set();
         for (const item of notebooks) {
+          let note = null;
+          let error = tagLookupError;
+          try {
+            note = await findVault(item.id, taggedVaults);
+            if (note) claimed.add(note.id);
+          } catch (lookupError) { error = lookupError; }
+          entries.push({ item, note, error });
+        }
+        const unresolved = entries.filter((entry) => !entry.note && !entry.error);
+        const orphaned = taggedVaults.filter((note) => !claimed.has(note.id));
+        for (const entry of entries) {
+          const { item, note, error } = entry;
           const row = el("div", "", "enb-notebook-row");
           row.append(el("span", item.name));
-          try {
-            const note = await findVault(item.id);
-            if (note) row.append(button("Decrypt", () => unlock(container, item)));
-            else row.append(el("span", "Encrypted data note not found.", "enb-status"));
-          } catch (error) {
-            row.append(el("span", `Could not check encrypted data: ${error.message}`, "enb-status"));
-          }
+          if (note) row.append(button("Decrypt", () => unlock(container, item)));
+          else if (error) row.append(el("span", `Could not check encrypted data: ${error.message}`, "enb-status"));
+          else if (orphaned.length) {
+            if (orphaned.length === 1 && unresolved.length === 1) {
+              const vault = orphaned[0];
+              row.append(el("span", "Encrypted data is associated with a different notebook ID.", "enb-status"));
+              row.append(button("Repair and decrypt", () => repairVaultAndUnlock(container, item, vault)));
+            } else {
+              const chooser = el("select");
+              chooser.setAttribute("aria-label", `Select encrypted data note to associate with ${item.name}`);
+              chooser.append(new Option("Select a vault note to repair…", ""));
+              for (const vault of orphaned) {
+                const option = new Option(`Vault ${vault.id} (currently associated with ${vault.notebookId || "no notebook"})`, vault.id);
+                chooser.append(option);
+              }
+              const repair = button("Repair and decrypt", () => {
+                const vault = orphaned.find((candidate) => candidate.id === chooser.value);
+                if (vault) repairVaultAndUnlock(container, item, vault);
+              });
+              repair.disabled = true;
+              chooser.addEventListener("change", () => { repair.disabled = !chooser.value; });
+              row.append(el("span", "Encrypted data is associated with a different notebook ID.", "enb-status"), chooser, repair);
+            }
+          } else row.append(el("span", "Encrypted data note not found.", "enb-status"));
           list.append(row);
         }
         container.append(list);
