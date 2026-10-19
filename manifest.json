@@ -2,7 +2,7 @@
   "type": "plugin",
   "id": "com.edgeever.encrypted-notebook",
   "name": "Encrypted Notebook",
-  "version": "1.0.3",
+  "version": "1.0.4",
   "apiVersion": "2",
   "settingsUi": "host",
   "description": "Create passphrase-protected notebooks with client-side encryption.",
