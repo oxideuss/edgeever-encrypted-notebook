@@ -237,6 +237,11 @@ export default {
       const notes = await queryVaultSummaries({ tags: [VAULT_TAG] });
       return notes.filter((note) => note.title === VAULT_TITLE);
     }
+    async function findVaultsByTitle() {
+      // This also finds legacy vault notes created before the marker tag existed.
+      const notes = await queryVaultSummaries({ text: VAULT_TITLE });
+      return notes.filter((note) => note.title === VAULT_TITLE);
+    }
     async function findVault(notebookId, taggedVaults = null) {
       // Tag queries are global. Match by the note's current association first,
       // so a stale/mismatched notebook ID cannot hide the encrypted payload.
@@ -283,13 +288,19 @@ export default {
           entries.push({ item, note, error });
         }
         const unresolved = entries.filter((entry) => !entry.note && !entry.error);
-        const orphaned = taggedVaults.filter((note) => !claimed.has(note.id));
+        let titleMatches = [];
+        let orphanLookupError = null;
+        if (unresolved.length) {
+          try { titleMatches = await findVaultsByTitle(); }
+          catch (error) { orphanLookupError = error; }
+        }
+        const candidateMap = new Map([...taggedVaults, ...titleMatches].map((note) => [note.id, note]));
+        const orphaned = [...candidateMap.values()].filter((note) => !claimed.has(note.id));
         for (const entry of entries) {
           const { item, note, error } = entry;
           const row = el("div", "", "enb-notebook-row");
           row.append(el("span", item.name));
           if (note) row.append(button("Decrypt", () => unlock(container, item)));
-          else if (error) row.append(el("span", `Could not check encrypted data: ${error.message}`, "enb-status"));
           else if (orphaned.length) {
             if (orphaned.length === 1 && unresolved.length === 1) {
               const vault = orphaned[0];
@@ -311,7 +322,9 @@ export default {
               chooser.addEventListener("change", () => { repair.disabled = !chooser.value; });
               row.append(el("span", "Encrypted data is associated with a different notebook ID.", "enb-status"), chooser, repair);
             }
-          } else row.append(el("span", "Encrypted data note not found.", "enb-status"));
+          } else if (error) row.append(el("span", `Could not check encrypted data: ${error.message}`, "enb-status"));
+          else if (orphanLookupError) row.append(el("span", `Could not search for orphaned encrypted data: ${orphanLookupError.message}`, "enb-status"));
+          else row.append(el("span", "Encrypted data note not found.", "enb-status"));
           list.append(row);
         }
         container.append(list);
